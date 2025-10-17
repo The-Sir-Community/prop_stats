@@ -116,6 +116,64 @@ def vector_to_axis_bounds(
     }
 
 
+def detect_mesh_validity_issues(scene: trimesh.Scene, bbox_volume: float) -> dict:
+    """
+    Detect mesh validity issues like large holes or missing faces.
+    Returns a dict with validity metrics to help identify broken/invalid meshes.
+
+    The goal is to flag meshes that are broken (e.g., missing bottom face on a cylinder)
+    while NOT flagging valid meshes with architectural features (doors, windows, etc.)
+    """
+    # Combine all geometries in the scene
+    combined_mesh = None
+    for geometry in scene.geometry.values():
+        if isinstance(geometry, trimesh.Trimesh):
+            if combined_mesh is None:
+                combined_mesh = geometry.copy()
+            else:
+                combined_mesh = trimesh.util.concatenate([combined_mesh, geometry])
+
+    if combined_mesh is None or not isinstance(combined_mesh, trimesh.Trimesh):
+        return {
+            "is_watertight": True,
+            "triangle_count": 0,
+            "volume_ratio": None,
+            "is_potentially_invalid": False
+        }
+
+    # Check if mesh is watertight (completely closed, no holes)
+    is_watertight = combined_mesh.is_watertight
+
+    # Get triangle/polygon count
+    triangle_count = len(combined_mesh.faces)
+
+    # Calculate volume ratio (mesh volume / bounding box volume)
+    # Low ratio might indicate missing geometry
+    try:
+        mesh_volume = float(combined_mesh.volume)
+        volume_ratio = round(mesh_volume / bbox_volume, 5) if bbox_volume > 0 else None
+    except Exception:
+        volume_ratio = None
+
+    # Heuristic to detect potentially invalid meshes:
+    # 1. Not watertight AND
+    # 2. Simple mesh (< 1000 triangles) AND
+    # 3. Very low volume ratio (< 0.3, suggesting 70%+ of bbox is empty)
+    is_potentially_invalid = (
+        not is_watertight and
+        triangle_count < 1000 and
+        volume_ratio is not None and
+        volume_ratio < 0.3
+    )
+
+    return {
+        "is_watertight": is_watertight,
+        "triangle_count": triangle_count,
+        "volume_ratio": volume_ratio,
+        "is_potentially_invalid": is_potentially_invalid
+    }
+
+
 def collect_stats(path: Path, asset_metadata: dict | None = None) -> dict:
     scene = load_scene(path)
     bounds = scene.bounds
@@ -149,6 +207,19 @@ def collect_stats(path: Path, asset_metadata: dict | None = None) -> dict:
     except Exception as exc:  # pragma: no cover - trimesh volume failures
         raise ValueError(f"Unable to compute volume for: {path}") from exc
 
+    # Check mesh validity
+    try:
+        validity_info = detect_mesh_validity_issues(scene, bbox_volume)
+        is_watertight = validity_info["is_watertight"]
+        triangle_count = validity_info["triangle_count"]
+        volume_ratio = validity_info["volume_ratio"]
+        is_potentially_invalid = validity_info["is_potentially_invalid"]
+    except Exception:  # pragma: no cover - fallback if analysis fails
+        is_watertight = None
+        triangle_count = None
+        volume_ratio = None
+        is_potentially_invalid = None
+
     result = {
         "name": path.stem,
         "bounding_box": vector_to_axis_bounds(bbox_min_raw, bbox_max_raw),
@@ -156,7 +227,11 @@ def collect_stats(path: Path, asset_metadata: dict | None = None) -> dict:
         "footprint": footprint,
         "height": height,
         "volume": volume,
+        "volume_ratio": volume_ratio,
         "center_of_mass": vector_to_point(center_mass_vector),
+        "is_watertight": is_watertight,
+        "triangle_count": triangle_count,
+        "is_potentially_invalid": is_potentially_invalid,
     }
 
     # Merge asset metadata if available
