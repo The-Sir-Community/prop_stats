@@ -27,7 +27,43 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
             "Path to the JSON file to write. Defaults to <directory>/glb_stats.json."
         ),
     )
+    parser.add_argument(
+        "-a",
+        "--asset-types",
+        type=Path,
+        help="Path to the asset_types.json file with additional metadata.",
+    )
     return parser.parse_args(argv)
+
+
+def load_asset_types(path: Path) -> dict[str, dict]:
+    """Load and parse asset_types.json file into a dictionary keyed by model name."""
+    with path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    asset_map = {}
+    for asset in data.get("AssetTypes", []):
+        model_name = asset.get("type")
+        if not model_name:
+            continue
+
+        # Extract constants into a dict for easier lookup
+        constants = {}
+        for constant in asset.get("constants", []):
+            constants[constant["name"]] = constant["value"]
+
+        # Build the asset metadata
+        asset_info = {
+            "name": model_name,
+            "path": asset.get("directory", ""),
+            "physicsCost": constants.get("physicsCost"),
+            "category": constants.get("category"),
+            "levelRestrictions": asset.get("levelRestrictions", []),
+        }
+
+        asset_map[model_name] = asset_info
+
+    return asset_map
 
 
 def load_scene(path: Path) -> trimesh.Scene:
@@ -80,7 +116,7 @@ def vector_to_axis_bounds(
     }
 
 
-def collect_stats(path: Path) -> dict:
+def collect_stats(path: Path, asset_metadata: dict | None = None) -> dict:
     scene = load_scene(path)
     bounds = scene.bounds
     if bounds is None:
@@ -97,18 +133,40 @@ def collect_stats(path: Path) -> dict:
     min_vector = round_vector(bbox_min_raw)
     max_vector = round_vector(bbox_max_raw)
     extents = [max_vector[idx] - min_vector[idx] for idx in range(3)]
-    bbox_area = round(extents[0] * extents[1], 5)
+
+    # Calculate 3D bounding box volume (m³)
+    bbox_volume = round(extents[0] * extents[1] * extents[2], 5)
+
+    # Calculate 2D footprint (X × Y area in m²)
+    footprint = round(extents[0] * extents[2], 5)
+
+    # Height is the Y extent
+    height = round(extents[1], 5)
+
+    # Actual mesh volume
     try:
         volume = round(float(scene.volume), 5)
     except Exception as exc:  # pragma: no cover - trimesh volume failures
         raise ValueError(f"Unable to compute volume for: {path}") from exc
-    return {
+
+    result = {
         "name": path.stem,
         "bounding_box": vector_to_axis_bounds(bbox_min_raw, bbox_max_raw),
-        "bounding_box_area": bbox_area,
+        "bounding_box_volume": bbox_volume,
+        "footprint": footprint,
+        "height": height,
         "volume": volume,
         "center_of_mass": vector_to_point(center_mass_vector),
     }
+
+    # Merge asset metadata if available
+    if asset_metadata:
+        result["path"] = asset_metadata.get("path", "")
+        result["physicsCost"] = asset_metadata.get("physicsCost")
+        result["category"] = asset_metadata.get("category")
+        result["levelRestrictions"] = asset_metadata.get("levelRestrictions", [])
+
+    return result
 
 
 def render_progress(current: int, total: int, name: str, *, bar_length: int = 30) -> None:
@@ -136,6 +194,18 @@ def main(argv: Iterable[str] | None = None) -> None:
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Load asset types if provided
+    asset_map = {}
+    if args.asset_types:
+        asset_types_path = args.asset_types.expanduser().resolve()
+        if not asset_types_path.is_file():
+            raise SystemExit(f"Asset types file not found: {asset_types_path}")
+        try:
+            asset_map = load_asset_types(asset_types_path)
+            print(f"Loaded {len(asset_map)} asset types from {asset_types_path}")
+        except Exception as exc:
+            raise SystemExit(f"Failed to load asset types: {exc}") from exc
+
     glb_files = sorted(
         path for path in directory.iterdir() if path.is_file() and path.suffix.lower() == ".glb"
     )
@@ -147,7 +217,9 @@ def main(argv: Iterable[str] | None = None) -> None:
     total_files = len(glb_files)
     for index, glb_path in enumerate(glb_files, start=1):
         try:
-            stats = collect_stats(glb_path)
+            # Look up asset metadata by the GLB filename (without extension)
+            asset_metadata = asset_map.get(glb_path.stem)
+            stats = collect_stats(glb_path, asset_metadata)
         except Exception as exc:  # pragma: no cover - surfaces errors to the caller
             sys.stdout.write("\n")
             raise SystemExit(f"Failed to process {glb_path.name}: {exc}") from exc
