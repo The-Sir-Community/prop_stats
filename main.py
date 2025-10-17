@@ -24,7 +24,7 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
         "--output",
         type=Path,
         help=(
-            "Path to the JSON file to write. Defaults to <directory>/glb_stats.json."
+            "Path to the JSON file to write. Defaults to <directory>/prop_stats.json."
         ),
     )
     parser.add_argument(
@@ -265,7 +265,7 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     output_path = args.output
     if output_path is None:
-        output_path = directory / "glb_stats.json"
+        output_path = directory / "prop_stats.json"
     output_path = output_path.expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
